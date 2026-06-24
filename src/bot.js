@@ -2,6 +2,7 @@ import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import { Telegraf } from "telegraf";
 
+
 const {
   TELEGRAM_BOT_TOKEN,
   ANTHROPIC_API_KEY,
