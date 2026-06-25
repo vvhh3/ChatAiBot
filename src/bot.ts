@@ -1,7 +1,12 @@
 import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
-import pdfParse from "pdf-parse";
+import { createRequire } from "node:module";
 import { Telegraf } from "telegraf";
+
+type PdfParse = typeof import("pdf-parse");
+
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse/lib/pdf-parse.js") as PdfParse;
 
 const {
   TELEGRAM_BOT_TOKEN,
