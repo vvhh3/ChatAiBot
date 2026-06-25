@@ -13,6 +13,7 @@ const {
   ANTHROPIC_API_KEY,
   ANTHROPIC_BASE_URL,
   AI_MODEL = "deepseek-v4-flash",
+  VISION_MODEL,
   SYSTEM_PROMPT = "You are a helpful AI assistant. Answer clearly and concisely. Use Markdown when it helps readability, especially for code blocks.",
   MAX_FILE_BYTES = "10485760",
   MAX_EXTRACTED_TEXT_CHARS = "60000",
@@ -34,6 +35,8 @@ const client = new Anthropic({
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const maxFileBytes = Number.parseInt(MAX_FILE_BYTES, 10);
 const maxExtractedTextChars = Number.parseInt(MAX_EXTRACTED_TEXT_CHARS, 10);
+
+class UserFacingError extends Error {}
 
 type TelegramFile = {
   file_id: string;
@@ -79,14 +82,20 @@ bot.on(["text", "photo", "document"], async (ctx) => {
   await ctx.sendChatAction("typing");
 
   try {
-    const content = await buildUserContent(ctx);
+    const { content, hasImage } = await buildUserContent(ctx);
 
     if (content.length === 0) {
       return ctx.reply("Пришли текст, фото или файл с подписью или вопросом.");
     }
 
+    if (hasImage && !VISION_MODEL) {
+      throw new UserFacingError(
+        "Фото дошло до бота, но для анализа изображений нужна vision-модель. Укажи в .env VISION_MODEL с моделью, которая умеет картинки, например Claude 3.5 Sonnet/Haiku или другую vision-модель твоего endpoint.",
+      );
+    }
+
     const response = await client.messages.create({
-      model: AI_MODEL,
+      model: hasImage ? VISION_MODEL! : AI_MODEL,
       max_tokens: 2048,
       messages: [{ role: "user", content: content as any }],
       system: SYSTEM_PROMPT,
@@ -102,6 +111,11 @@ bot.on(["text", "photo", "document"], async (ctx) => {
     await replyMarkdown(ctx, answer || "Модель не вернула текстовый ответ.");
   } catch (error) {
     console.error("AI request failed:", error);
+
+    if (error instanceof UserFacingError) {
+      return ctx.reply(error.message);
+    }
+
     await ctx.reply(
       "Не получилось получить ответ от AI. Проверь ключи, endpoint и поддержку файлов выбранной моделью.",
     );
@@ -122,9 +136,12 @@ process.once("SIGTERM", () => bot.stop("SIGTERM"));
 void bot.launch();
 console.log("Telegram AI bot is running");
 
-async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
+async function buildUserContent(
+  ctx: any,
+): Promise<{ content: AnthropicContentBlock[]; hasImage: boolean }> {
   const message = ctx.message;
   const content: AnthropicContentBlock[] = [];
+  let hasImage = false;
   const text = getMessageText(message);
 
   if (text) {
@@ -150,6 +167,7 @@ async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
           data: downloaded.data.toString("base64"),
         },
       });
+      hasImage = true;
     }
   }
 
@@ -188,6 +206,7 @@ async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
           data: downloaded.data.toString("base64"),
         },
       });
+      hasImage = true;
     } else {
       content.push({
         type: "text",
@@ -209,7 +228,7 @@ async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
     });
   }
 
-  return content;
+  return { content, hasImage };
 }
 
 function getMessageText(message: any): string {
