@@ -1,5 +1,6 @@
 import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
+import pdfParse from "pdf-parse";
 import { Telegraf } from "telegraf";
 
 const {
@@ -9,6 +10,7 @@ const {
   AI_MODEL = "deepseek-v4-flash",
   SYSTEM_PROMPT = "You are a helpful AI assistant. Answer clearly and concisely. Use Markdown when it helps readability, especially for code blocks.",
   MAX_FILE_BYTES = "10485760",
+  MAX_EXTRACTED_TEXT_CHARS = "60000",
 } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -26,6 +28,7 @@ const client = new Anthropic({
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const maxFileBytes = Number.parseInt(MAX_FILE_BYTES, 10);
+const maxExtractedTextChars = Number.parseInt(MAX_EXTRACTED_TEXT_CHARS, 10);
 
 type TelegramFile = {
   file_id: string;
@@ -43,15 +46,6 @@ type AnthropicContentBlock =
         media_type: string;
         data: string;
       };
-    }
-  | {
-      type: "document";
-      source: {
-        type: "base64";
-        media_type: string;
-        data: string;
-      };
-      title?: string;
     };
 
 const textMimeTypes = new Set([
@@ -159,18 +153,26 @@ async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
     const downloaded = await downloadTelegramFile(ctx, file);
     const name = file.file_name ?? "file";
 
-    if (isTextFile(downloaded.mimeType, name)) {
+    if (isPdfFile(downloaded.mimeType, name)) {
+      const pdfText = await extractPdfText(downloaded.data);
+
       content.push({
         type: "text",
-        text: [
-          `Пользователь прикрепил файл: ${name}`,
-          `MIME type: ${downloaded.mimeType}`,
-          "",
-          "Содержимое файла:",
-          "```",
-          downloaded.data.toString("utf8"),
-          "```",
-        ].join("\n"),
+        text: buildAttachedFileText({
+          name,
+          mimeType: downloaded.mimeType,
+          content: pdfText || "Не удалось извлечь текст из PDF. Возможно, это скан без OCR-слоя.",
+          note: pdfText ? `PDF pages: ${pdfText.pageCount}` : undefined,
+        }),
+      });
+    } else if (isTextFile(downloaded.mimeType, name)) {
+      content.push({
+        type: "text",
+        text: buildAttachedFileText({
+          name,
+          mimeType: downloaded.mimeType,
+          content: downloaded.data.toString("utf8"),
+        }),
       });
     } else if (downloaded.mimeType.startsWith("image/")) {
       content.push({
@@ -183,13 +185,14 @@ async function buildUserContent(ctx: any): Promise<AnthropicContentBlock[]> {
       });
     } else {
       content.push({
-        type: "document",
-        title: name,
-        source: {
-          type: "base64",
-          media_type: downloaded.mimeType,
-          data: downloaded.data.toString("base64"),
-        },
+        type: "text",
+        text: [
+          `Пользователь прикрепил файл: ${name}`,
+          `MIME type: ${downloaded.mimeType}`,
+          `Size: ${downloaded.data.byteLength} bytes`,
+          "",
+          "Содержимое этого типа файла бот пока не умеет извлекать в текст. Если пользователь просит проанализировать файл, объясни это коротко и попроси прислать PDF, TXT/MD/JSON/код или фото.",
+        ].join("\n"),
       });
     }
   }
@@ -243,6 +246,51 @@ function isTextFile(mimeType: string, fileName: string): boolean {
   return /\.(c|cpp|cs|css|env|go|html|java|js|json|jsx|log|md|py|rb|rs|sql|ts|tsx|txt|xml|yaml|yml)$/i.test(
     fileName,
   );
+}
+
+function isPdfFile(mimeType: string, fileName: string): boolean {
+  return mimeType === "application/pdf" || /\.pdf$/i.test(fileName);
+}
+
+async function extractPdfText(data: Buffer): Promise<{ pageCount: number; text: string } | null> {
+  const parsed = await pdfParse(data);
+  const text = parsed.text.trim();
+
+  if (!text) {
+    return null;
+  }
+
+  return {
+    pageCount: parsed.numpages,
+    text,
+  };
+}
+
+function buildAttachedFileText(input: {
+  name: string;
+  mimeType: string;
+  content: string | { text: string };
+  note?: string;
+}): string {
+  const rawContent = typeof input.content === "string" ? input.content : input.content.text;
+  const trimmedContent = rawContent.slice(0, maxExtractedTextChars);
+  const truncated =
+    rawContent.length > maxExtractedTextChars
+      ? `\n\n[Текст обрезан до ${maxExtractedTextChars} символов. Если нужно, попроси пользователя прислать более конкретный вопрос.]`
+      : "";
+
+  return [
+    `Пользователь прикрепил файл: ${input.name}`,
+    `MIME type: ${input.mimeType}`,
+    input.note,
+    "",
+    "Содержимое файла:",
+    "```",
+    `${trimmedContent}${truncated}`,
+    "```",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function replyMarkdown(ctx: any, markdown: string): Promise<void> {
